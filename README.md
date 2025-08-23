@@ -74,5 +74,7 @@ rosspy is a Python-based interactive ROS1 Topic Browser that allows you to conve
 
 
 ```shell
+source /opt/ros/noetic/setup.bash
 python3 rosspy.py
+
 ```
