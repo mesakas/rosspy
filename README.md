@@ -69,6 +69,12 @@ rosspy is a Python-based interactive ROS1 Topic Browser that allows you to conve
 
 
 
+## 下载 / Download
+```shell
+git clone https://github.com/mesakas/rosspy.git
+```
+
+
 
 ## 运行 / Run
 
@@ -78,3 +84,4 @@ source /opt/ros/noetic/setup.bash
 python3 rosspy.py
 
 ```
+
