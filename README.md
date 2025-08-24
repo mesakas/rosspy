@@ -6,6 +6,35 @@ rosspy is a Python-based interactive ROS1 Topic Browser that allows you to conve
 
 
 
+
+## 运行环境 / Requirements
+
+- Ubuntu 20.04
+- ROS Noetic
+- Python 3.8+
+
+
+
+
+## 下载 / Download
+```shell
+git clone https://github.com/mesakas/rosspy.git
+```
+
+
+
+## 运行 / Run
+
+
+```shell
+source /opt/ros/noetic/setup.bash
+python3 rosspy.py
+
+```
+
+
+
+
 ## 特性 / Features
 
 - **话题列表浏览**
@@ -60,28 +89,5 @@ rosspy is a Python-based interactive ROS1 Topic Browser that allows you to conve
 
 
 
-## 运行环境 / Requirements
 
-- Ubuntu 20.04
-- ROS Noetic
-- Python 3.8+
-
-
-
-
-## 下载 / Download
-```shell
-git clone https://github.com/mesakas/rosspy.git
-```
-
-
-
-## 运行 / Run
-
-
-```shell
-source /opt/ros/noetic/setup.bash
-python3 rosspy.py
-
-```
 
