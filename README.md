@@ -28,6 +28,7 @@ git clone https://github.com/mesakas/rosspy.git
 
 ```shell
 source /opt/ros/noetic/setup.bash
+source <your_topic_package>/devel/setup.bash    # custom message.
 python3 rosspy.py
 
 ```
@@ -84,6 +85,7 @@ python3 rosspy.py
   - No GUI / rqt / matplotlib windows required
   - Everything works directly in the terminal
   - Ideal for servers and remote SSH sessions
+
 
 
 
