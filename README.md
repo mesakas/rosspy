@@ -22,7 +22,7 @@ Roself is a Python-based interactive ROS1 Topic Browser that allows you to conve
 pip install --user roself
 ```
 
-#### 运行 / Run
+#### 使用pip安装的运行方式 / Run(use Pip)
 
 
 ```shell
@@ -43,7 +43,7 @@ git clone https://github.com/mesakas/roself.git
 
 
 
-#### 运行 / Run
+#### 使用代码的运行方式 / Run(clone code)
 
 
 ```shell
@@ -123,6 +123,7 @@ python3 roself.py -b your_rosbag.bag
   - No GUI / rqt / matplotlib windows required
   - Everything works directly in the terminal
   - Ideal for servers and remote SSH sessions
+
 
 
 
