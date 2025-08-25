@@ -17,13 +17,33 @@ Roself is a Python-based interactive ROS1 Topic Browser that allows you to conve
 
 
 ## 下载 / Download
+### Pip（推荐）:
+```shell
+pip install --user roself
+```
+
+#### 运行 / Run
+
+
+```shell
+source /opt/ros/noetic/setup.bash
+source <your_custom_message_package>/devel/setup.bash    # custom message.
+roself
+
+# rosbag play：
+roself -b your_rosbag.bag
+```
+
+
+
+### 代码安装
 ```shell
 git clone https://github.com/mesakas/roself.git
 ```
 
 
 
-## 运行 / Run
+#### 运行 / Run
 
 
 ```shell
@@ -103,6 +123,7 @@ python3 roself.py -b your_rosbag.bag
   - No GUI / rqt / matplotlib windows required
   - Everything works directly in the terminal
   - Ideal for servers and remote SSH sessions
+
 
 
 
