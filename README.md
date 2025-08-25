@@ -20,6 +20,8 @@ Roself is a Python-based interactive ROS1 Topic Browser that allows you to conve
 ### Pip（推荐）:
 ```shell
 pip install --user roself
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
 ```
 
 #### 使用pip安装的运行方式 / Run(use Pip)
@@ -130,6 +132,7 @@ python3 roself.py -b your_rosbag.bag
   - No GUI / rqt / matplotlib windows required
   - Everything works directly in the terminal
   - Ideal for servers and remote SSH sessions
+
 
 
 
