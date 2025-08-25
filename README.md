@@ -40,7 +40,9 @@ python3 rosspy.py -b your_rosbag.bag
 <img width="1098" height="557" alt="image" src="https://github.com/user-attachments/assets/dbd1bc93-45a8-4477-8fcc-41b728c6f2a7" />
 <img width="1106" height="559" alt="image" src="https://github.com/user-attachments/assets/35d81da9-f810-46c9-840a-cd6169bec1fe" />
 
-新增对读取rosbag的支持：
+---
+
+新增对播放rosbag的支持：
 <img width="1175" height="540" alt="image" src="https://github.com/user-attachments/assets/d2cc96e1-3171-4872-8a86-5234f550889f" />
 
 
@@ -52,6 +54,9 @@ python3 rosspy.py -b your_rosbag.bag
   - 自动列出 ROS master 中所有话题，支持自定义消息（需要source <你的消息>/setup.bash）
   - 支持上下选择、左右翻页、关键词筛选
   - 显示话题名称与类型
+- **支持对rosbag的播放和控制**
+  - 可以播放任意自定义消息的rosbag包，只需要source消息后运行即可
+  - 可以运行时控制播放的位置，就像音乐播放器那样
 - **消息详情浏览**
   - 任意进入话题，实时显示最新消息
   - 支持**嵌套字段钻取**（递归展开）
@@ -78,6 +83,9 @@ python3 rosspy.py -b your_rosbag.bag
   - Automatically list all topics from the ROS master, including custom message types (requires `source <your_msgs>/setup.bash`)
   - Navigate with ↑/↓, paginate with ←/→, filter by keywords
   - Display topic name and type
+- **Bag Playback and Control**
+  - Play any rosbag file, including those containing custom message types (just `source` your message package before running)
+  - Full playback control at runtime, just like a media player: play/pause, step forward/backward, seek by percentage, and adjust step size
 - **Message Detail Viewer**
   - Subscribe to any topic and view the latest message in real-time
   - Support for **nested field drill-down** (recursive expansion)
@@ -95,6 +103,7 @@ python3 rosspy.py -b your_rosbag.bag
   - No GUI / rqt / matplotlib windows required
   - Everything works directly in the terminal
   - Ideal for servers and remote SSH sessions
+
 
 
 
