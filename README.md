@@ -1,8 +1,8 @@
-# ROSSPY
+# ROSELF
 
-**rosspy** 是一个基于 Python 的 **交互式 ROS1 Topic 浏览工具**，支持在命令行界面（TUI）中方便地查看、筛选、钻取和实时监控话题数据。
+**Roself** 是一个基于 Python 的 **交互式 ROS1 Topic 浏览工具**，支持在命令行界面（TUI）中方便地查看、筛选、钻取和实时监控话题数据。
 
-rosspy is a Python-based interactive ROS1 Topic Browser that allows you to conveniently explore, filter, drill down, and monitor topic data in real-time from the terminal (TUI).
+Roself is a Python-based interactive ROS1 Topic Browser that allows you to conveniently explore, filter, drill down, and monitor topic data in real-time from the terminal (TUI).
 
 
 
@@ -18,7 +18,7 @@ rosspy is a Python-based interactive ROS1 Topic Browser that allows you to conve
 
 ## 下载 / Download
 ```shell
-git clone https://github.com/mesakas/rosspy.git
+git clone https://github.com/mesakas/roself.git
 ```
 
 
@@ -29,10 +29,10 @@ git clone https://github.com/mesakas/rosspy.git
 ```shell
 source /opt/ros/noetic/setup.bash
 source <your_custom_message_package>/devel/setup.bash    # custom message.
-python3 rosspy.py
+python3 roself.py
 
 # rosbag play：
-python3 rosspy.py -b your_rosbag.bag
+python3 roself.py -b your_rosbag.bag
 ```
 
 
@@ -103,6 +103,7 @@ python3 rosspy.py -b your_rosbag.bag
   - No GUI / rqt / matplotlib windows required
   - Everything works directly in the terminal
   - Ideal for servers and remote SSH sessions
+
 
 
 
