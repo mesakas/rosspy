@@ -20,8 +20,12 @@ from typing import List, Tuple, Optional, Any
 import rospy
 import rostopic
 import roslib.message
-import rosgraph              # <<< 新增：使用 rosgraph.Master 访问 rosmaster
+import rosgraph
 from roslib.message import strify_message
+
+import argparse
+import rosbag  # 新增
+
 
 
 def safe_addstr(win, y, x, text, attr=0):
@@ -320,6 +324,158 @@ class TopicHzMonitor:
         return (len(dq) - 1) / span
 
 
+
+
+
+# ====================== Bag 播放器 ======================
+class BagPlayer:
+    """
+    轻量播放器：
+      - play/pause：按 1× 实时从 bag 起点开始连续发布
+      - step(+dt/-dt)：按时间窗重放一段
+      - tick()：若处于播放状态，则按 wall-clock 推进并发布
+    """
+    def __init__(self, bag_path: str):
+        ensure_ros_node()
+        import rosbag
+        self.bag = rosbag.Bag(bag_path, 'r')
+
+        info = self.bag.get_type_and_topic_info()
+        # topic -> type
+        self.topic_types = {t: v.msg_type for t, v in info.topics.items()}
+
+        # 统计（尽量兼容不同 Noetic 版本）
+        self.topic_counts = {}
+        try:
+            self.topic_counts = {t: v.message_count for t, v in info.topics.items()}
+        except Exception:
+            # 读一遍索引统计（较慢，但只做一次）
+            counts = {}
+            for c in self.bag._get_connections():
+                counts.setdefault(c.topic, 0)
+                counts[c.topic] += self.bag._get_connection_counts().get(c.id, 0)
+            self.topic_counts = counts
+
+        self.t_start = self.bag.get_start_time()
+        self.t_end   = self.bag.get_end_time()
+        self.duration = max(0.0, self.t_end - self.t_start)
+
+        # 播放状态
+        self.cursor = 0.0           # 相对时间（秒），范围 [0, duration]
+        self.playing = False
+        self._last_wall = None      # 上次 tick 的 monotonic 时间
+
+        # publisher 池
+        self.pubs = {}              # topic -> rospy.Publisher
+
+        # 统计（最近一次 step/tick 发出的区间与条数）
+        self.last_step_count = 0
+        self.last_step_range = (0.0, 0.0)
+
+        # 可选：记录最近一次错误
+        self.last_error = None
+
+    def close(self):
+        try:
+            self.bag.close()
+        except Exception:
+            pass
+
+    # ---------- pub 工具 ----------
+    def _get_pub(self, topic: str):
+        if topic in self.pubs:
+            return self.pubs[topic]
+        tname = self.topic_types.get(topic)
+        if not tname:
+            return None
+        cls = roslib.message.get_message_class(tname)
+        if cls is None:
+            GLOBAL_LOG.append(f"[WARN] bag type not found: {tname} ({topic})")
+            return None
+        pub = rospy.Publisher(topic, cls, queue_size=10)
+        self.pubs[topic] = pub
+        return pub
+
+    def _publish_range(self, t0_abs: float, t1_abs: float):
+        """在 bag 的绝对时间 [t0_abs, t1_abs) 内发布消息（按原顺序）"""
+        cnt = 0
+        try:
+            for topic, msg, t in self.bag.read_messages(
+                start_time=rospy.Time.from_sec(t0_abs),
+                end_time=rospy.Time.from_sec(t1_abs)
+            ):
+                pub = self._get_pub(topic)
+                if pub is not None:
+                    try:
+                        pub.publish(msg)
+                        cnt += 1
+                    except Exception as e:
+                        GLOBAL_LOG.append(f"[WARN] publish {topic} failed: {e}")
+        except Exception as e:
+            self.last_error = str(e)
+            GLOBAL_LOG.append(f"[ERR] read_messages failed: {e}")
+        self.last_step_count = cnt
+        self.last_step_range = (t0_abs - self.t_start, t1_abs - self.t_start)
+
+    # ---------- step/seek ----------
+    def step(self, direction: int, step_sec: float):
+        """direction:+1 前进 / -1 后退；发布对应区间并移动光标"""
+        if self.duration <= 0.0:
+            return
+        step_sec = max(0.0, float(step_sec))
+        if direction >= 0:
+            rel0 = self.cursor
+            rel1 = min(self.duration, self.cursor + step_sec)
+            if rel1 > rel0:
+                self._publish_range(self.t_start + rel0, self.t_start + rel1)
+                self.cursor = rel1
+        else:
+            rel1 = self.cursor
+            rel0 = max(0.0, self.cursor - step_sec)
+            if rel1 > rel0:
+                # 回退也“正序”发布该区间（用于回看/重放）
+                self._publish_range(self.t_start + rel0, self.t_start + rel1)
+                self.cursor = rel0
+
+    def set_cursor(self, rel_sec: float):
+        self.cursor = max(0.0, min(self.duration, float(rel_sec)))
+
+    # ---------- 播放控制 ----------
+    def play(self):
+        if not self.playing:
+            self.playing = True
+            self._last_wall = time.monotonic()
+
+    def pause(self):
+        self.playing = False
+        self._last_wall = None
+
+    def toggle_play(self):
+        if self.playing:
+            self.pause()
+        else:
+            self.play()
+
+    # 在主循环里高频调用：若正在播放，就按 wall-clock 推进并发布
+    def tick(self):
+        if not self.playing or self.duration <= 0.0:
+            return
+        now = time.monotonic()
+        if self._last_wall is None:
+            self._last_wall = now
+            return
+        dt = max(0.0, now - self._last_wall)   # 实时 1×
+        self._last_wall = now
+
+        rel0 = self.cursor
+        rel1 = min(self.duration, rel0 + dt)
+        if rel1 > rel0:
+            self._publish_range(self.t_start + rel0, self.t_start + rel1)
+            self.cursor = rel1
+
+        # 播放到末尾自动暂停
+        if self.cursor >= self.duration - 1e-9:
+            self.pause()
 
 
 
@@ -1227,6 +1383,174 @@ class ChartViewUI:
 
 
 
+# ====================== TUI：Bag 播放控制 ======================
+class BagControlUI:
+    """
+    键位：
+      Space : 播放 / 暂停
+      ← / → : 按步长回退 / 前进（发布对应时间窗内消息）
+      + / - : 步长 ×2 / ÷2（最小 1s，最大总时长 10%）
+      0     : 步长重置为 1s
+      ESC   : 退出 bag 模式
+    """
+    def __init__(self, win, player: BagPlayer):
+        self.win = win
+        self.p = player
+        self.step = 1.0
+        self.step_min = 1.0
+        self.step_max = max(1.0, self.p.duration * 0.10)
+
+        # 预格式化“rosbag info 风格”的元数据（按窗口高度截断展示）
+        self._meta_lines_cache = None
+
+    def _format_time(self, sec: float) -> str:
+        # 显示为 H:MM:SS.mmm
+        ms = int((sec - int(sec)) * 1000)
+        sec = int(sec)
+        h = sec // 3600
+        m = (sec % 3600) // 60
+        s = sec % 60
+        return f"{h}:{m:02d}:{s:02d}.{ms:03d}"
+
+    def _build_meta_lines(self) -> list:
+        if self._meta_lines_cache is not None:
+            return self._meta_lines_cache
+
+        lines = []
+        lines.append(f"Path:      (opened)  duration {self.p.duration:.2f}s")
+        try:
+            import datetime
+            t0 = datetime.datetime.fromtimestamp(self.p.t_start)
+            t1 = datetime.datetime.fromtimestamp(self.p.t_end)
+            lines.append(f"Start:     {t0}")
+            lines.append(f"End:       {t1}")
+        except Exception:
+            pass
+
+        lines.append("Topics:")
+        # 按 topic 名排序
+        for t in sorted(self.p.topic_types.keys()):
+            ty = self.p.topic_types.get(t, "?")
+            cnt = self.p.topic_counts.get(t, "?")
+            lines.append(f"  - {t}  [{ty}]  msgs: {cnt}")
+        self._meta_lines_cache = lines
+        return lines
+
+    def _jump_percent(self, frac: float):
+        """按总时长的 frac 跳转（正=前进，负=后退），只移动光标不发布。"""
+        if self.p.duration <= 0.0:
+            return
+        jump = abs(frac) * self.p.duration
+        newpos = self.p.cursor + (jump if frac >= 0 else -jump)
+        newpos = max(0.0, min(self.p.duration, newpos))
+        # 跳转时暂停播放更稳（可按需去掉这一行）
+        self.p.pause()
+        self.p.set_cursor(newpos)
+        # 仅用于 UI 提示
+        self.p.last_step_count = 0
+        self.p.last_step_range = (min(self.p.cursor, newpos), max(self.p.cursor, newpos))
+
+
+    def handle_key(self, ch):
+        if ch == 27:  # ESC
+            # 退出前暂停更稳妥
+            self.p.pause()
+            return True
+        
+         # —— Shift + 方向键：按总时长 10% 跳转（seek，不发布）——
+        # 优先用 curses 的标准键码（多数终端支持）
+        KEY_SLEFT  = getattr(curses, "KEY_SLEFT",  -1)
+        KEY_SRIGHT = getattr(curses, "KEY_SRIGHT", -1)
+        if ch == KEY_SLEFT:
+            self._jump_percent(-0.10)
+            return False
+        if ch == KEY_SRIGHT:
+            self._jump_percent(+0.10)
+            return False
+
+        elif ch in (ord(' '),):   # 播放 / 暂停
+            self.p.toggle_play()
+
+        elif ch == curses.KEY_LEFT:
+            self.p.step(-1, self.step)
+
+        elif ch == curses.KEY_RIGHT:
+            self.p.step(+1, self.step)
+
+        elif ch in (ord('+'),):
+            self.step = min(self.step_max, max(self.step_min, self.step * 2.0))
+
+        elif ch in (ord('-'),):
+            self.step = max(self.step_min, self.step / 2.0)
+
+        elif ch == ord('0'):
+            self.step = 1.0
+
+        elif ch in (ord('+'), ord('=')):   # 兼容部分布局 Shift+'=' 出 '+'
+            self.step = min(self.step_max, max(self.step_min, self.step * 2.0))
+        elif ch in (ord('-'), curses.KEY_IC, curses.KEY_DC):
+            self.step = max(self.step_min, self.step / 2.0)
+
+        return False
+
+    def tick(self):
+        # 每帧调用，驱动连续播放
+        self.p.tick()
+
+    def draw(self):
+        self.win.erase()
+        H, W = self.win.getmaxyx()
+        if H < 8 or W < 40:
+            safe_addstr(self.win, 0, 0, "Terminal too small; enlarge this pane.")
+            self.win.noutrefresh(); return
+
+        # 头部：状态 + 步长
+        state = "PLAY" if self.p.playing else "PAUSE"
+        title = (f"BAG PLAYER  |  state={state}  "
+                 f"cursor={self.p.cursor:.2f}s  step={self.step:.2f}s "
+                 f"(min=1s max={self.step_max:.2f}s)")
+        safe_addstr(self.win, 0, 0, title[:W-1], curses.A_REVERSE)
+
+        # 进度条（第2行留空作为间距；第3行显示条形+左右时间）
+        bar_y = 2
+        cur = self.p.cursor
+        dur = max(1e-9, self.p.duration)
+        ltxt = self._format_time(cur)
+        rtxt = self._format_time(dur)
+        ratio = min(1.0, max(0.0, cur / dur))
+
+        # 进度条主体
+        bar_w = max(10, W - 2)
+        filled = int(ratio * bar_w)
+        bar = "█" * filled + " " * (bar_w - filled)
+        safe_addstr(self.win, bar_y, 0, bar[:W-1])
+
+        # 左右标签
+        safe_addstr(self.win, bar_y + 1, 0, ltxt)
+        safe_addstr(self.win, bar_y + 1, max(0, W - len(rtxt) - 1), rtxt)
+
+        # 最近一次发布统计
+        r0, r1 = self.p.last_step_range
+        info = f"last out: [{r0:.2f}s, {r1:.2f}s)  msgs: {self.p.last_step_count}"
+        safe_addstr(self.win, bar_y + 2, 0, info[:W-1])
+
+        # 元数据块（类似 rosbag info）
+        safe_addstr(self.win, bar_y + 4, 0, "Info:", curses.A_BOLD)
+        lines = self._build_meta_lines()
+
+        # 为了不挤满界面，按窗口剩余高度裁剪
+        top = bar_y + 5
+        max_lines = max(0, H - top - 1)
+        for i in range(min(max_lines, len(lines))):
+            safe_addstr(self.win, top + i, 0, lines[i][:W-1])
+
+        # 底部帮助
+        hint = "Keys: SPACE play/pause   ← back   → forward   +/- step×2/÷2   0 reset   ESC back"
+        safe_addstr(self.win, H-1, 0, hint[:W-1], curses.A_REVERSE)
+
+        self.win.noutrefresh()
+
+
 
 # ====================== 主循环 ======================
 def main_curses(stdscr):
@@ -1241,9 +1565,15 @@ def main_curses(stdscr):
 
     logpane = LogPane()
 
+    # 先声明局部变量
+    bag_ui: Optional[BagControlUI] = None
     chart_ui = None              # ChartViewUI 或 None
     list_ui: Optional[TopicListUI] = None
     view_ui: Optional[TopicViewUI] = None
+
+    # —— 若从 main() 注入了 bag_ui，接管为初始页面 —— 
+    if hasattr(main_curses, "_bag_ui_inst") and main_curses._bag_ui_inst is not None:
+        bag_ui = main_curses._bag_ui_inst  # 现在不会触发 UnboundLocalError
 
     def draw_all():
         stdscr.erase()
@@ -1251,8 +1581,11 @@ def main_curses(stdscr):
         main_rect, log_rect = logpane.layout(H, W)
         main_win = stdscr.derwin(main_rect[2], main_rect[3], main_rect[0], main_rect[1])
 
-        # 只在一个地方决定画什么：chart 优先，其次 view，最后 list
-        if chart_ui is not None:
+        # 决定画什么：bag > chart > view > list
+        if bag_ui is not None:
+            bag_ui.win = main_win
+            bag_ui.draw()
+        elif chart_ui is not None:
             chart_ui.win = main_win
             chart_ui.draw()
         elif view_ui is not None:
@@ -1293,28 +1626,12 @@ def main_curses(stdscr):
                 except Exception:
                     pass
                 last_draw = 0
-                # 不要在这里继续处理其他逻辑，直接进入下一轮
                 continue
 
-            # 全局日志窗快捷键（不依赖当前视图）
-            # if ch == curses.KEY_F2:       logpane.toggle_side()
-            # elif ch in (ord('+'),):       logpane.inc()
-            # elif ch in (ord('-'),):       logpane.dec()
-            # elif ch == curses.KEY_PPAGE:  GLOBAL_LOG.scroll_up(10)
-            # elif ch == curses.KEY_NPAGE:  GLOBAL_LOG.scroll_down(10)
-            # elif ch == curses.KEY_HOME:   GLOBAL_LOG.scroll_home()
-            # elif ch == curses.KEY_END:    GLOBAL_LOG.scroll_end()
-            # elif ch in (ord('l'), ord('L')): GLOBAL_LOG.clear()
-            # elif ch in (ord('o'), ord('O')):
-            #     on = GLOBAL_LOG.toggle_capture()
-            #     GLOBAL_LOG.append(f"[LOG] output capture -> {on}")
-
-
-
-            # === 全局日志窗快捷键（避免与其它页冲突；在筛选模式下禁用） ===
+            # === 全局日志窗快捷键（筛选模式下禁用） ===
             allow_log_hotkeys = True
             if isinstance(list_ui, TopicListUI) and list_ui.filter_mode:
-                allow_log_hotkeys = False  # 筛选时屏蔽日志窗快捷键
+                allow_log_hotkeys = False
 
             if allow_log_hotkeys:
                 if ch == curses.KEY_F2:       logpane.toggle_side()
@@ -1329,26 +1646,27 @@ def main_curses(stdscr):
                     on = GLOBAL_LOG.toggle_capture()
                     GLOBAL_LOG.append(f"[LOG] output capture -> {on}")
 
+            # —— 页面调度（严格优先级：bag > chart > view > list）——
+            if bag_ui is not None:
+                if ch != -1 and bag_ui.handle_key(ch):
+                    # 退出 bag 模式
+                    bag_ui = None
+                else:
+                    # 连续播放驱动（非阻塞）
+                    bag_ui.tick()
 
-
-
-            # —— 页面调度（唯一的一处）——
-            if chart_ui is not None:
-                # 图表页优先处理
+            elif chart_ui is not None:
                 if ch != -1 and chart_ui.handle_key(ch):
                     chart_ui = None
 
             elif view_ui is not None:
-                # 详情页
                 ret = None
                 if ch != -1:
                     ret = view_ui.handle_key(ch)
                 if ret is True:
-                    # 退出详情页
                     view_ui.stop_sub()
                     view_ui = None
                 elif isinstance(ret, tuple) and len(ret) == 3 and ret[0] == "chart":
-                    # 打开实时曲线图
                     _, title, reader = ret
                     chart_ui = ChartViewUI(None, title, reader)
 
@@ -1391,13 +1709,63 @@ def main_curses(stdscr):
             time.sleep(0.05)
 
 
-
-
 def main():
-    # rospy.init_node("ros_tui_watch", anonymous=True, disable_signals=True)
+    parser = argparse.ArgumentParser(description="ROS Noetic 交互式 Topic 浏览 + Bag 播放控制")
+    parser.add_argument("-b", "--bag", type=str, default=None, help="bag 文件路径（进入播放控制模式）")
+    args = parser.parse_args()
 
-    curses.wrapper(main_curses)
+    # 为了把参数传给 curses 包装的回调，用闭包变量
+    state = {"bag_path": args.bag}
 
+    def _wrapped(stdscr):
+        nonlocal state
+        # 进入 curses 前初始化 bag（如果有）
+        bag_player = None
+        bag_ui_inst = None
+        if state["bag_path"]:
+            try:
+                bag_player = BagPlayer(state["bag_path"])
+                GLOBAL_LOG.append(f"[INFO] Opened bag: {state['bag_path']}  duration={bag_player.duration:.2f}s")
+            except Exception as e:
+                GLOBAL_LOG.append(f"[ERR] 打开 bag 失败：{e}")
+
+        # 运行真正的 UI；把 bag_ui 注入到 main_curses 的局部变量作用域
+        # —— 做法：把原 main_curses 的代码轻量改造为可见 bag_ui 变量（已在上面改过）
+        # 这里我们临时把 main_curses 里的局部变量通过闭包“写进去”：
+        def launcher(stdscr_inner):
+            nonlocal bag_player, bag_ui_inst
+            # 先调用 main_curses，里面在第一次 draw 前我们植入 bag_ui
+            # 做法：利用函数属性注入（简单直接）
+            main_curses._bag_player = bag_player
+            main_curses._bag_ui_inst = None if bag_player is None else BagControlUI(None, bag_player)
+            return main_curses(stdscr_inner)
+
+        try:
+            return launcher(stdscr)
+        finally:
+            if bag_player:
+                bag_player.close()
+
+    # 修改 main_curses 让其在启动时读取注入的 bag_ui
+    _orig_main_curses = main_curses
+    def main_curses_with_bag(stdscr):
+        # 复制原函数体：我们只在进入后第一帧把 _bag_ui_inst 塞给局部 bag_ui
+        # 做法：猴子补丁：把 _orig_main_curses 的闭包变量读取（上面我们已经改过 main_curses 以支持 bag_ui）
+        # 这里更简单：调用原 main_curses 前，给它全局单例赋初值。
+        return _orig_main_curses(stdscr)
+    # 用原名绑定（不必真的替换）
+    # 在进入 curses.wrapper 之前，给 main_curses 设置一次属性
+    main_curses._bag_player = None
+    main_curses._bag_ui_inst = None
+
+    # 轻量 hook：在 main_curses 的最开始注入 bag_ui
+    # —— 在你的 main_curses(stdscr) 里，找到“logpane = LogPane()”后面，添加这两行：
+    #     if hasattr(main_curses, "_bag_ui_inst") and main_curses._bag_ui_inst is not None:
+    #         bag_ui = main_curses._bag_ui_inst
+    #
+    # （这两行只需添加一次；下面再贴一次以防遗漏）
+
+    curses.wrapper(_wrapped)
 
 
 
