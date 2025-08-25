@@ -31,7 +31,17 @@ source /opt/ros/noetic/setup.bash
 source <your_custom_message_package>/devel/setup.bash    # custom message.
 python3 rosspy.py
 
+# rosbag play：
+python3 rosspy.py -b your_rosbag.bag
 ```
+
+
+<img width="768" height="202" alt="image" src="https://github.com/user-attachments/assets/18d91a03-5d50-4371-9fb6-5fb03c4ddc4c" />
+<img width="1098" height="557" alt="image" src="https://github.com/user-attachments/assets/dbd1bc93-45a8-4477-8fcc-41b728c6f2a7" />
+<img width="1106" height="559" alt="image" src="https://github.com/user-attachments/assets/35d81da9-f810-46c9-840a-cd6169bec1fe" />
+
+新增对读取rosbag的支持：
+<img width="1175" height="540" alt="image" src="https://github.com/user-attachments/assets/d2cc96e1-3171-4872-8a86-5234f550889f" />
 
 
 
@@ -85,6 +95,7 @@ python3 rosspy.py
   - No GUI / rqt / matplotlib windows required
   - Everything works directly in the terminal
   - Ideal for servers and remote SSH sessions
+
 
 
 
