@@ -1,16 +1,16 @@
 # ROSELF
 
-**Roself** 是一个基于 Python 的 **交互式 ROS1 Topic 浏览工具**，支持在命令行界面（TUI）中方便地查看、筛选、钻取和实时监控话题数据。
+Roself 是一个基于 Python 的 交互式 ROS1 / ROS2 Topic 浏览 + Bag 播放工具，在终端（TUI）中即可方便地查看、筛选、钻取和实时监控话题数据，同时支持类似媒体播放器的 rosbag 播放与控制。
 
-Roself is a Python-based interactive ROS1 Topic Browser that allows you to conveniently explore, filter, drill down, and monitor topic data in real-time from the terminal (TUI).
+Roself is a Python-based interactive ROS1/ROS2 Topic Browser and Bag Player, allowing you to conveniently explore, filter, drill down, and monitor topic data in real-time, as well as control rosbag playback directly from the terminal (TUI).
 
 
 
 
 ## 运行环境 / Requirements
 
-- Ubuntu 20.04
-- ROS Noetic
+- Ubuntu 20.04+ / 22.04+
+- ROS1 (Noetic) 或 ROS2 (Foxy+, Humble 等)
 - Python 3.8+
 
 
@@ -28,32 +28,24 @@ source ~/.bashrc
 
 
 ```shell
+# ROS1 环境
 source /opt/ros/noetic/setup.bash
-source <your_custom_message_package>/devel/setup.bash    # custom message.
+source <your_custom_msg>/devel/setup.bash   # 若有自定义消息
 roself
 
-# rosbag play：
-roself -b your_rosbag.bag
+# ROS2 环境
+source /opt/ros/humble/setup.bash
+roself
+
+# 播放 rosbag
+roself -b your_rosbag.bag        # ROS1
+roself -b your_ros2_bag_folder   # ROS2
 ```
 
-
-
-### 代码安装
+### 从源码运行
 ```shell
 git clone https://github.com/mesakas/roself.git
-```
-
-
-
-#### 使用代码的运行方式 / Run(clone code)
-
-
-```shell
-source /opt/ros/noetic/setup.bash
-source <your_custom_message_package>/devel/setup.bash    # custom message.
-python3 roself.py
-
-# rosbag play：
+cd roself
 python3 roself.py -b your_rosbag.bag
 ```
 
@@ -77,75 +69,55 @@ python3 roself.py -b your_rosbag.bag
 
 
 
-## 特性 / Features
-
-- **话题列表浏览**
-  - 自动列出 ROS master 中所有话题，支持自定义消息（需要source <你的消息>/setup.bash）
-  - 支持上下选择、左右翻页、关键词筛选
-  - 显示话题名称与类型
-- **支持对rosbag的播放和控制**
-  - 可以播放任意自定义消息的rosbag包，只需要source消息后运行即可
-  - 可以运行时控制播放的位置，就像音乐播放器那样
-- **消息详情浏览**
-  - 任意进入话题，实时显示最新消息
-  - 支持**嵌套字段钻取**（递归展开）
-  - 每个字段显示 **Name | Type | Value**
-  - 自动计算并显示消息频率 Hz
-- **实时数值曲线**
-  - 选中数值字段，按 **Enter** 预览单条曲线
-  - 曲线采用 ASCII/Unicode 火花线实时渲染，直接在命令行显示
-  - 显示数值范围 `[min, max]`
-- **日志/输出捕获**
-  - 内置日志窗口，捕获程序输出和错误
-  - 支持底部/右侧布局切换（F2）、大小调整（+/-）、滚动查看（PgUp/PgDn）、清空（l）
-- **完全命令行**
-  - 无需 GUI / rqt / matplotlib 窗口，只需要一个命令行窗口，即可使用所有功能
-  - 适合服务器、远程 SSH 环境
 
 
 
 
 
+## 功能 / Features
+### 话题浏览 / Topic Browser
+- 自动列出所有话题，支持 ROS1 与 ROS2
+- 支持上下选择、左右翻页、关键字筛选
+- 显示 话题名 | 类型 | Hz
+- 显示当前运行的 ROS 版本 与 运行时信息
 
+### 消息详情 / Message Viewer
+- 订阅任意话题，实时查看最新消息
+- 支持 嵌套字段递归展开
+- 每个字段显示 Name | Type | Value
+- 自动统计并显示 Hz
 
-- **Topic List Browser**
-  - Automatically list all topics from the ROS master, including custom message types (requires `source <your_msgs>/setup.bash`)
-  - Navigate with ↑/↓, paginate with ←/→, filter by keywords
-  - Display topic name and type
-- **Bag Playback and Control**
-  - Play any rosbag file, including those containing custom message types (just `source` your message package before running)
-  - Full playback control at runtime, just like a media player: play/pause, step forward/backward, seek by percentage, and adjust step size
-- **Message Detail Viewer**
-  - Subscribe to any topic and view the latest message in real-time
-  - Support for **nested field drill-down** (recursive expansion)
-  - Display each field as **Name | Type | Value**
-  - Automatically estimate and display message frequency (Hz)
-- **Realtime Numeric Plots**
-  - Select a numeric field and press **Enter** to preview a single curve
-  - Rendered directly in the terminal using ASCII/Unicode sparklines
-  - Shows numeric range `[min, max]`
-- **Log / Output Capture**
-  - Built-in log panel to capture program output and errors
-  - Toggle layout (bottom/right) with **F2**
-  - Resize with (+/-), scroll with (PgUp/PgDn), clear with (l)
-- **Fully Command-Line Based**
-  - No GUI / rqt / matplotlib windows required
-  - Everything works directly in the terminal
-  - Ideal for servers and remote SSH sessions
+### 实时数值曲线 / Realtime Numeric Plot
+- 任意选中数值字段 → 按 Enter 打开实时曲线
+- 支持多种渲染模式：bars, blocks, envelope, line, braille
+- 显示 min/max/avg/cur，右下角保留高精度当前值
+- 支持平滑、锁定 Y 轴、缩放窗口
 
+### Rosbag 播放 / Bag Playback
+- 支持 ROS1 .bag 与 ROS2 rosbag2 (sqlite3/mcap)
+- 完整的播放控制：
+- SPACE 播放/暂停
+- ← / → 按步长后退/前进
+- \+ / - / 0 调整/重置步长
+- Shift+←/→ 快速跳转 10%
+- L 开关循环（全局或区间）
+- Shift+1..9 设置书签；1..9 跳转书签
+- C 区间模式：
+  - Off → Modify（输入起止点） → On（区间生效）
+  - 在 On/Modify 再按一次 C → 清除区间，回到 Off
+  - SegMode 状态显示：Off / Modify / On
+  - R 回到起始点（若有区间则回到区间起点）
 
+### 日志捕获 / Log Capture
+- 内置日志窗，捕获程序输出与错误
+- F2 切换底部/右侧
+- F3/F4 调整大小
+- PgUp/PgDn/Home/End 滚动查看
+- o 开关捕获，l 清空
 
-
-
-
-
-
-
-
-
-
-
-
+### 完全命令行 / Fully CLI-based
+- 无需 GUI / rqt / matplotlib
+- 所有功能在终端完成，支持远程 SSH / 服务器环境
 
 
 
