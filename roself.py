@@ -453,54 +453,125 @@ class BagPlayerROS1:
         import rosbag
         self.api = api
         self.bag = rosbag.Bag(bag_path, 'r')
+
         info = self.bag.get_type_and_topic_info()
         self.topic_types = {t: v.msg_type for t, v in info.topics.items()}
         try:
             self.topic_counts = {t: v.message_count for t, v in info.topics.items()}
         except Exception:
             self.topic_counts = {}
+
         self.t_start = self.bag.get_start_time()
         self.t_end = self.bag.get_end_time()
         self.duration = max(0.0, self.t_end - self.t_start)
+
         self.cursor = 0.0
         self.playing = False
         self._last_wall = None
+
         self.pubs: Dict[str, Any] = {}
         self.last_step_count = 0
         self.last_step_range = (0.0, 0.0)
         self.last_error = None
+
+        # 遇到 data_class 未初始化时，自动切到 raw 模式
+        self._prefer_raw = False
+
     def close(self):
-        try: self.bag.close()
-        except Exception: pass
+        try:
+            self.bag.close()
+        except Exception:
+            pass
+
     def _get_pub(self, topic: str):
-        if topic in self.pubs: return self.pubs[topic]
+        if topic in self.pubs:
+            return self.pubs[topic]
         tname = self.topic_types.get(topic)
-        if not tname: return None
+        if not tname:
+            return None
         pub = self.api.create_publisher(topic, tname)
         self.pubs[topic] = pub
         return pub
+
+    def _publish_range_normal(self, t0_abs: float, t1_abs: float) -> int:
+        """常规读取并发布（需要本机有对应消息包）"""
+        import rospy
+        cnt = 0
+        for topic, msg, t in self.bag.read_messages(
+            start_time=rospy.Time.from_sec(t0_abs),
+            end_time=rospy.Time.from_sec(t1_abs)
+        ):
+            pub = self._get_pub(topic)
+            if pub is None:
+                continue
+            try:
+                pub.publish(msg)
+                cnt += 1
+            except Exception as e:
+                GLOBAL_LOG.append(f"[WARN] publish {topic} failed: {e}")
+        return cnt
+
+    def _publish_range_raw(self, t0_abs: float, t1_abs: float) -> int:
+        """
+        raw=True 读取字节流，再手动反序列化：
+        read_messages(..., raw=True) 返回 (topic, (datatype, data, md5, pos, pytype), t)
+        """
+        import rospy
+        from roslib.message import get_message_class
+        cnt = 0
+        for topic, raw, t in self.bag.read_messages(
+            start_time=rospy.Time.from_sec(t0_abs),
+            end_time=rospy.Time.from_sec(t1_abs),
+            raw=True
+        ):
+            try:
+                # 兼容不同 rosbags：raw 可能是 4 或 5 元组
+                if len(raw) == 5:
+                    datatype, data, md5sum, pos, pytype = raw
+                else:
+                    # (datatype, data, md5sum, pos)
+                    datatype, data, md5sum, pos = raw
+                cls = get_message_class(datatype)
+                if cls is None:
+                    # 本机确实没有该消息包，跳过
+                    continue
+                m = cls()
+                # 某些环境 data 是 memoryview，需要转 bytes
+                m.deserialize(data if isinstance(data, (bytes, bytearray)) else bytes(data))
+
+                pub = self._get_pub(topic)
+                if pub is None:
+                    continue
+                pub.publish(m)
+                cnt += 1
+            except Exception as e:
+                GLOBAL_LOG.append(f"[WARN] raw publish {topic} failed: {e}")
+        return cnt
+
     def _publish_range(self, t0_abs: float, t1_abs: float):
         cnt = 0
-        import rospy
         try:
-            for topic, msg, t in self.bag.read_messages(
-                start_time=rospy.Time.from_sec(t0_abs),
-                end_time=rospy.Time.from_sec(t1_abs)
-            ):
-                pub = self._get_pub(topic)
-                if pub is not None:
-                    try:
-                        pub.publish(msg)
-                        cnt += 1
-                    except Exception as e:
-                        GLOBAL_LOG.append(f"[WARN] publish {topic} failed: {e}")
+            if self._prefer_raw:
+                cnt = self._publish_range_raw(t0_abs, t1_abs)
+            else:
+                cnt = self._publish_range_normal(t0_abs, t1_abs)
         except Exception as e:
-            self.last_error = str(e)
-            GLOBAL_LOG.append(f"[ERR] read_messages failed: {e}")
+            # 碰到 data_class 或反序列化问题，切换到 raw 模式重试一次
+            msg = str(e)
+            if ("data_class" in msg) or ("deserialize" in msg) or ("not initialized" in msg):
+                GLOBAL_LOG.append("[INFO] normal read_messages failed; fallback to raw mode")
+                self._prefer_raw = True
+                cnt = self._publish_range_raw(t0_abs, t1_abs)
+            else:
+                self.last_error = msg
+                GLOBAL_LOG.append(f"[ERR] read_messages failed: {e}")
+
         self.last_step_count = cnt
         self.last_step_range = (t0_abs - self.t_start, t1_abs - self.t_start)
+
     def step(self, direction: int, step_sec: float):
-        if self.duration <= 0.0: return
+        if self.duration <= 0.0:
+            return
         step_sec = max(0.0, float(step_sec))
         if direction >= 0:
             rel0 = self.cursor
@@ -512,32 +583,44 @@ class BagPlayerROS1:
             rel1 = self.cursor
             rel0 = max(0.0, self.cursor - step_sec)
             if rel1 > rel0:
+                # 回退时也按正序发布该区间
                 self._publish_range(self.t_start + rel0, self.t_start + rel1)
                 self.cursor = rel0
+
     def set_cursor(self, rel_sec: float):
         self.cursor = max(0.0, min(self.duration, float(rel_sec)))
+
     def play(self):
         if not self.playing:
             self.playing = True
             self._last_wall = time.monotonic()
+
     def pause(self):
         self.playing = False
         self._last_wall = None
+
     def toggle_play(self):
-        if self.playing: self.pause()
-        else: self.play()
+        if self.playing:
+            self.pause()
+        else:
+            self.play()
+
     def tick(self):
-        if not self.playing or self.duration <= 0.0: return
+        if not self.playing or self.duration <= 0.0:
+            return
         now = time.monotonic()
         if self._last_wall is None:
-            self._last_wall = now; return
+            self._last_wall = now
+            return
         dt = max(0.0, now - self._last_wall)
         self._last_wall = now
+
         rel0 = self.cursor
         rel1 = min(self.duration, rel0 + dt)
         if rel1 > rel0:
             self._publish_range(self.t_start + rel0, self.t_start + rel1)
             self.cursor = rel1
+
         if self.cursor >= self.duration - 1e-9:
             self.pause()
 
@@ -745,7 +828,7 @@ class TopicListUI:
             self.filter_mode = True
             return None
         if self.filter_mode:
-            if ch == 27:  # ESC
+            if ch in (ord('q'), ord('Q')):  # 用 q 返回/退出
                 self.filter_mode = False
                 if self.filter_text:
                     self.filter_text = ""; self.apply_filter()
@@ -897,7 +980,7 @@ class TopicViewUI:
         cur_obj, cur_t = self._navigate(msg)
         return len(self._children(cur_obj, cur_t))
     def handle_key(self, ch) -> Any:
-        if ch == 27:  # ESC
+        if ch in (ord('q'), ord('Q')):  # q 退出 bag 模式
             if self.path:
                 self.path.pop(); self.sel_index = 0; self.page = 0
             else:
@@ -1018,7 +1101,7 @@ class ChartViewUI:
         self.last_raw = None
         self.last_raw_ts = 0.0
     def handle_key(self, ch) -> bool:
-        if ch == 27:  # ESC
+        if ch in (ord('q'), ord('Q')):
             return True
         elif ch in (ord(' '),):
             self.paused = not self.paused
@@ -1268,8 +1351,25 @@ class ChartViewUI:
             safe_addstr(self.win, y, x, cur_str)
         self.win.noutrefresh()
 
-# ====================== Bag 控制 UI（含循环/书签/区间） ======================
+
+
+
 class BagControlUI:
+    """
+    键位：
+      空格        : 播放/暂停
+      ← / →      : 按步长回退 / 前进（发布对应时间窗内消息）
+      + / -      : 步长 ×2 / ÷2（最小 1s，最大总时长 10%）
+      0          : 步长重置为 1s
+      Shift+←/→  : 按总时长 10% 跳转（seek，不发布）
+      q          : 退出 bag 模式（若处于“Modify 区间模式”，q/ESC 仅退出 Modify，不清除区间）
+      L          : 循环开关（未设置区间则循环全局，设置区间则循环区间）
+      Shift+1..9 : 设置书签
+      1..9       : 跳转到书签（在 Modify 模式下，作为区间起止点输入）
+      C/c        : 在 Off→Modify（进入输入）→On（输入完成）之间流转；在 On 或 Modify 时再次按 C 会清除区间并回到 Off
+      R/r        : 跳到起始点（已设区间则跳区间起点，否则 0.0s）
+    SegMode 显示：Off（关闭） / Modify（输入） / On（启动区间模式）
+    """
     def __init__(self, win, player):
         self.win = win
         self.p = player
@@ -1277,101 +1377,186 @@ class BagControlUI:
         self.step_min = 1.0
         self.step_max = max(1.0, self.p.duration * 0.10)
         self._meta_lines_cache = None
-        # 新功能状态
+
+        # —— 循环 / 区间 / 书签 状态 —— 
         self.loop_enabled = False
         self.loop_a: Optional[float] = None
         self.loop_b: Optional[float] = None
-        self.bookmarks: List[Optional[float]] = [None] * 10
+        self.bookmarks: List[Optional[float]] = [None] * 10  # 用索引 1..9
+        # Modify 模式的内部状态：0=Off；1=等待第一个数字；2=等待第二个数字
         self.segment_arm = 0
         self.segment_first_idx = None
+
+    # ---------- 工具 ----------
     def _format_time(self, sec: float) -> str:
-        ms = int((sec - int(sec)) * 1000); sec = int(sec)
-        h = sec // 3600; m = (sec % 3600) // 60; s = sec % 60
+        ms = int((sec - int(sec)) * 1000)
+        sec = int(sec)
+        h = sec // 3600
+        m = (sec % 3600) // 60
+        s = sec % 60
         return f"{h}:{m:02d}:{s:02d}.{ms:03d}"
+
     def _build_meta_lines(self) -> list:
-        if self._meta_lines_cache is not None: return self._meta_lines_cache
+        if self._meta_lines_cache is not None:
+            return self._meta_lines_cache
         lines = []
         lines.append(f"Duration: {self.p.duration:.2f}s")
         try:
             import datetime
             t0 = datetime.datetime.fromtimestamp(getattr(self.p, "t_start", 0.0))
             t1 = datetime.datetime.fromtimestamp(getattr(self.p, "t_end", 0.0))
-            lines.append(f"Start:    {t0}"); lines.append(f"End:      {t1}")
-        except Exception: pass
+            lines.append(f"Start:    {t0}")
+            lines.append(f"End:      {t1}")
+        except Exception:
+            pass
         lines.append("Topics:")
         for t in sorted(self.p.topic_types.keys()):
-            ty = self.p.topic_types.get(t, "?"); cnt = self.p.topic_counts.get(t, "?")
+            ty = self.p.topic_types.get(t, "?")
+            cnt = self.p.topic_counts.get(t, "?")
             lines.append(f"  - {t}  [{ty}]  msgs: {cnt}")
         self._meta_lines_cache = lines
         return lines
+
     def _jump_percent(self, frac: float):
-        if self.p.duration <= 0.0: return
+        """按总时长 frac 跳转（正=前进，负=后退），不发布消息。"""
+        if self.p.duration <= 0.0:
+            return
         jump = abs(frac) * self.p.duration
         newpos = self.p.cursor + (jump if frac >= 0 else -jump)
         newpos = max(0.0, min(self.p.duration, newpos))
-        self.p.pause(); self.p.set_cursor(newpos)
+        self.p.pause()
+        self.p.set_cursor(newpos)
         self.p.last_step_count = 0
         self.p.last_step_range = (min(self.p.cursor, newpos), max(self.p.cursor, newpos))
+
     def _digit_from_char(self, ch: int) -> Optional[int]:
-        if ord('1') <= ch <= ord('9'): return ch - ord('0')
-        mapping = {'!':1,'@':2,'#':3,'$':4,'%':5,'^':6,'&':7,'*':8,'(' :9}
+        # 普通数字 1..9
+        if ord('1') <= ch <= ord('9'):
+            return ch - ord('0')
+        # Shift+1..9 映射：! @ # $ % ^ & * (
+        mapping = {'!': 1, '@': 2, '#': 3, '$': 4, '%': 5, '^': 6, '&': 7, '*': 8, '(': 9}
         return mapping.get(chr(ch))
-    # 书签/区间/循环
+
+    # ---------- 书签 ----------
     def _handle_bookmark_set(self, digit: int):
         self.bookmarks[digit] = self.p.cursor
         GLOBAL_LOG.append(f"[BMK] Set bookmark {digit} at {self._format_time(self.p.cursor)}")
+
     def _handle_bookmark_jump(self, digit: int):
         t = self.bookmarks[digit]
         if t is None:
-            GLOBAL_LOG.append(f"[BMK] Bookmark {digit} not set"); return
+            GLOBAL_LOG.append(f"[BMK] Bookmark {digit} not set")
+            return
         self.p.set_cursor(t)
         GLOBAL_LOG.append(f"[BMK] Jump to bookmark {digit} @ {self._format_time(t)}")
-    def _enter_segment_mode(self):
-        self.segment_arm = 1; self.segment_first_idx = None
-        GLOBAL_LOG.append("[SEG] Segment mode: press first digit (1-9) for START bookmark")
-    def _exit_segment_mode(self):
-        self.segment_arm = 0; self.segment_first_idx = None
+
+    # ---------- 区间模式（Modify 输入） ----------
+    def _enter_modify(self):
+        self.segment_arm = 1
+        self.segment_first_idx = None
+        GLOBAL_LOG.append("[SEG] Modify：请按第一个数字键 (1-9) 选择起点书签")
+
+    def _exit_modify(self):
+        self.segment_arm = 0
+        self.segment_first_idx = None
+
+    def _clear_segment(self):
+        self.loop_a = None
+        self.loop_b = None
+
     def _handle_segment_digit(self, digit: int):
         if self.segment_arm == 1:
             if self.bookmarks[digit] is None:
-                GLOBAL_LOG.append(f"[SEG] Bookmark {digit} not set; segment aborted")
-                self._exit_segment_mode(); return
-            self.segment_first_idx = digit; self.segment_arm = 2
-            GLOBAL_LOG.append("[SEG] Press second digit (1-9) for END bookmark")
+                GLOBAL_LOG.append(f"[SEG] Bookmark {digit} 未设置；已退出 Modify（不改变已有区间）")
+                self._exit_modify()
+                return
+            self.segment_first_idx = digit
+            self.segment_arm = 2
+            GLOBAL_LOG.append("[SEG] Modify：请按第二个数字键 (1-9) 选择终点书签")
         elif self.segment_arm == 2:
-            idx1 = self.segment_first_idx; idx2 = digit
+            idx1 = self.segment_first_idx
+            idx2 = digit
             t1 = self.bookmarks[idx1] if idx1 is not None else None
             t2 = self.bookmarks[idx2]
             if t1 is None or t2 is None:
-                GLOBAL_LOG.append("[SEG] Bookmark not set; segment aborted")
-                self._exit_segment_mode(); return
+                GLOBAL_LOG.append("[SEG] 书签未设置；已退出 Modify（不改变已有区间）")
+                self._exit_modify()
+                return
             a, b = (t1, t2) if t1 <= t2 else (t2, t1)
-            if a == b:
-                GLOBAL_LOG.append("[SEG] Zero-length segment ignored")
-                self._exit_segment_mode(); return
+            if abs(a - b) < 1e-9:
+                GLOBAL_LOG.append("[SEG] 起止相同，忽略；已退出 Modify")
+                self._exit_modify()
+                return
             self.loop_a, self.loop_b = a, b
-            GLOBAL_LOG.append(f"[SEG] Segment set: {self._format_time(a)} → {self._format_time(b)} "
-                              f"({'LOOP' if self.loop_enabled else 'PAUSE at end'})")
+            GLOBAL_LOG.append(f"[SEG] On：{self._format_time(a)} → {self._format_time(b)} "
+                              f"（{'LOOP' if self.loop_enabled else 'PAUSE 到终点'}）")
             self.p.set_cursor(self.loop_a)
-            self._exit_segment_mode()
-    # 事件处理
+            self._exit_modify()
+
+    def _seg_mode_text(self) -> str:
+        if self.segment_arm != 0:
+            return "Modify"
+        if self.loop_a is not None and self.loop_b is not None:
+            return "On"
+        return "Off"
+
+    # ---------- 键盘处理 ----------
     def handle_key(self, ch):
-        if ch == 27:  # ESC
-            self.p.pause(); return True
+        # —— 在 Modify 中，q/ESC 仅退出 Modify，不清除区间 —— 
+        if self.segment_arm != 0 and ch in (ord('q'), ord('Q'), 27):  # 27 = ESC
+            GLOBAL_LOG.append("[SEG] 已退出 Modify（未清除区间）")
+            self._exit_modify()
+            return False
+
+        # q 退出（非 Modify）
+        if ch in (ord('q'), ord('Q')):
+            self.p.pause()
+            return True
+
+        # Shift+方向：按总时长 10% 跳转（seek，不发布）
         KEY_SLEFT  = getattr(curses, "KEY_SLEFT",  -1)
         KEY_SRIGHT = getattr(curses, "KEY_SRIGHT", -1)
-        if ch == KEY_SLEFT:  self._jump_percent(-0.10); return False
-        if ch == KEY_SRIGHT: self._jump_percent(+0.10); return False
-        if ch in (19, ord('c')):
-            self._enter_segment_mode(); return False
+        if ch == KEY_SLEFT:
+            self._jump_percent(-0.10); return False
+        if ch == KEY_SRIGHT:
+            self._jump_percent(+0.10); return False
+
+        # C/c —— 状态机：
+        # Off -> C -> Modify
+        # Modify -> C -> Off（清除区间）
+        # On -> C -> Off（清除区间）
+        if ch in (ord('c'), ord('C')):
+            if self.segment_arm != 0:
+                # Modify → Off + 清除
+                self._exit_modify()
+                self._clear_segment()
+                GLOBAL_LOG.append("[SEG] Off：已清除区间，回到全局范围")
+            elif self.loop_a is not None and self.loop_b is not None:
+                # On → Off + 清除
+                self._clear_segment()
+                GLOBAL_LOG.append("[SEG] Off：已清除区间，回到全局范围")
+            else:
+                # Off → Modify
+                self._enter_modify()
+            return False
+
+        # L 循环开/关（未设区间则默认全局范围）
         if ch in (ord('l'), ord('L')):
             self.loop_enabled = not self.loop_enabled
             if self.loop_enabled and (self.loop_a is None or self.loop_b is None):
-                self.loop_a, self.loop_b = 0.0, self.p.duration
-            GLOBAL_LOG.append(f"[LOOP] {'ON' if self.loop_enabled else 'OFF'} : "
-                              f"{self._format_time(self.loop_a or 0.0)} → {self._format_time(self.loop_b or self.p.duration)}")
+                self.loop_a, self.loop_b = None, None  # 全局循环由 None/None 表示
+            GLOBAL_LOG.append(f"[LOOP] {'ON' if self.loop_enabled else 'OFF'}")
             return False
-        if ch in (ord(' '),):   # play/pause
+
+        # R/r 跳到起点（优先区间起点）
+        if ch in (ord('r'), ord('R')):
+            target = self.loop_a if (self.loop_a is not None and self.loop_b is not None) else 0.0
+            self.p.set_cursor(max(0.0, min(self.p.duration, float(target))))
+            GLOBAL_LOG.append(f"[JUMP] 回到起点：{self._format_time(self.p.cursor)}")
+            return False
+
+        # 播放/暂停与步进
+        if ch in (ord(' '),):
             self.p.toggle_play(); return False
         elif ch == curses.KEY_LEFT:
             self.p.step(-1, self.step); return False
@@ -1383,83 +1568,119 @@ class BagControlUI:
             self.step = max(self.step_min, self.step / 2.0); return False
         elif ch == ord('0'):
             self.step = 1.0; return False
+
+        # 数字键：Shift+数字 = 设置书签；普通数字 = 跳转；在 Modify 下作为起/终点
         digit = self._digit_from_char(ch)
         if digit is not None and 1 <= digit <= 9:
             if chr(ch) in "!@#$%^&*(":
                 self._handle_bookmark_set(digit)
             else:
-                if self.segment_arm in (1,2):
+                if self.segment_arm in (1, 2):
                     self._handle_segment_digit(digit)
                 else:
                     self._handle_bookmark_jump(digit)
             return False
+
         return False
+
+    # ---------- 连续播放 + 循环/区间 ----------
     def tick(self):
-        prev = self.p.cursor
         self.p.tick()
         cur = self.p.cursor
-        a = 0.0 if self.loop_a is None else self.loop_a
-        b = (self.p.duration if self.loop_b is None else self.loop_b)
-        if b < a: a, b = b, a
-        has_segment = (b - a) > 1e-9
+
+        # 计算当前是否有“区间”
+        has_segment = (self.loop_a is not None and self.loop_b is not None)
         if has_segment:
-            if cur < a: self.p.set_cursor(a); cur = a
-            if cur > b: self.p.set_cursor(b); cur = b
-            if not self.p.playing: return
-            if cur >= b - 1e-9:
+            a = min(self.loop_a, self.loop_b)
+            b = max(self.loop_a, self.loop_b)
+            # 约束光标在区间内
+            if cur < a:
+                self.p.set_cursor(a); cur = a
+            if cur > b:
+                self.p.set_cursor(b); cur = b
+            # 播放到末尾：循环 or 暂停
+            if self.p.playing and cur >= b - 1e-9:
                 if self.loop_enabled:
                     self.p.set_cursor(a)
                 else:
                     self.p.pause()
         else:
+            # 全局循环
             if self.loop_enabled and self.p.playing and cur >= self.p.duration - 1e-9:
                 self.p.set_cursor(0.0)
+
+    # ---------- 绘制 ----------
     def draw(self):
         self.win.erase()
         H, W = self.win.getmaxyx()
         if H < 10 or W < 40:
             safe_addstr(self.win, 0, 0, "Terminal too small; enlarge this pane.")
-            self.win.noutrefresh(); return
+            self.win.noutrefresh()
+            return
+
         state = "PLAY" if self.p.playing else "PAUSE"
         title = (f"BAG PLAYER  |  {ros_version_str()}  |  state={state}  "
                  f"cursor={self.p.cursor:.2f}s  step={self.step:.2f}s "
                  f"(min=1s max={self.step_max:.2f}s)  |  Runtime: {runtime_hint()}")
         safe_addstr(self.win, 0, 0, title[:W-1], curses.A_REVERSE)
+
+        # 进度条
         bar_y = 2
-        cur = self.p.cursor; dur = max(1e-9, self.p.duration)
-        ltxt = self._format_time(cur); rtxt = self._format_time(dur)
+        cur = self.p.cursor
+        dur = max(1e-9, self.p.duration)
+        ltxt = self._format_time(cur)
+        rtxt = self._format_time(dur)
         ratio = min(1.0, max(0.0, cur / dur))
-        bar_w = max(10, W - 2); filled = int(ratio * bar_w)
+        bar_w = max(10, W - 2)
+        filled = int(ratio * bar_w)
         bar = "█" * filled + " " * (bar_w - filled)
         safe_addstr(self.win, bar_y, 0, bar[:W-1])
         safe_addstr(self.win, bar_y + 1, 0, ltxt)
         safe_addstr(self.win, bar_y + 1, max(0, W - len(rtxt) - 1), rtxt)
+
+        # 最近一次发布统计
         r0, r1 = self.p.last_step_range
         info = f"last out: [{r0:.2f}s, {r1:.2f}s)  msgs: {self.p.last_step_count}"
         safe_addstr(self.win, bar_y + 2, 0, info[:W-1])
-        a = self.loop_a if self.loop_a is not None else 0.0
-        b = self.loop_b if self.loop_b is not None else self.p.duration
-        seg_txt = f"{self._format_time(a)} → {self._format_time(b)}" if (self.loop_b is not None or self.loop_enabled) else "—"
+
+        # 循环/区间/书签状态
+        if self.loop_a is not None and self.loop_b is not None:
+            a, b = min(self.loop_a, self.loop_b), max(self.loop_a, self.loop_b)
+            seg_txt = f"{self._format_time(a)} → {self._format_time(b)}"
+        else:
+            seg_txt = "—"
+
         loop_txt = "ON" if self.loop_enabled else "OFF"
+        seg_mode_txt = self._seg_mode_text()  # Off / Modify / On
+
         bmks = []
-        for i in range(1,10):
+        for i in range(1, 10):
             t = self.bookmarks[i]
             bmks.append(f"{i}:{self._format_time(t) if t is not None else '--:--:--.---'}")
-        safe_addstr(self.win, bar_y + 4, 0, f"Loop: {loop_txt}   Segment: {seg_txt}"[:W-1])
+
+        safe_addstr(self.win, bar_y + 4, 0, f"Loop: {loop_txt}   Segment: {seg_txt}   SegMode: {seg_mode_txt}"[:W-1])
         safe_addstr(self.win, bar_y + 5, 0, ("Bookmarks  " + "  ".join(bmks))[:W-1])
+
+        # bag 信息（类似 rosbag info）
         safe_addstr(self.win, bar_y + 7, 0, "Info:", curses.A_BOLD)
         lines = self._build_meta_lines()
-        top = bar_y + 8; max_lines = max(0, H - top - 2)
+        top = bar_y + 8
+        max_lines = max(0, H - top - 2)
         for i in range(min(max_lines, len(lines))):
             safe_addstr(self.win, top + i, 0, lines[i][:W-1])
+
+        # 帮助提示
         help1 = ("Keys: SPACE play/pause   ← back   → forward   +/- step×2/÷2   0 reset   "
-                 "Shift+←/→ seek10%   ESC back")
+                 "Shift+←/→ seek10%   q back")
         help2 = ("L loop on/off   Shift+1..9 set bookmark   1..9 jump bookmark   "
-                 "Ctrl+S (or 'c') then 1..9 twice → set segment [start..end] "
-                 "(no loop: pause at end; loop: repeat)")
+                 "C: Off→Modify→On；在 On/Modify 再按 C 清除回 Off   R 回到起点/区间起点")
         safe_addstr(self.win, H-2, 0, help1[:W-1], curses.A_REVERSE)
         safe_addstr(self.win, H-1, 0, help2[:W-1], curses.A_REVERSE)
+
         self.win.noutrefresh()
+
+
+
 
 # ====================== 主循环 ======================
 def main_curses(stdscr, initial_bag_ui: Optional[BagControlUI] = None):
